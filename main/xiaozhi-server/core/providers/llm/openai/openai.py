@@ -34,7 +34,7 @@ class LLMProvider(LLMProviderBase):
             responses = self.client.chat.completions.create(
                 model=self.model_name,
                 messages=dialogue,
-                stream=True,
+                stream=False,
                 max_tokens=self.max_tokens,
             )
 

@@ -140,7 +140,7 @@ selected_module:
   # 语音识别模块，默认使用FunASR本地模型
   ASR: FunASR
   # 将根据配置名称对应的type调用实际的LLM适配器
-  LLM: ChatGLMLLM
+  LLM: DeepSeekLLM
   # TTS将根据配置名称对应的type调用实际的TTS适配器
   TTS: EdgeTTS
   # 记忆模块，默认不开启记忆；如果想使用超长记忆，推荐使用mem0ai；如果注重隐私，请使用本地的mem_local_short
@@ -268,9 +268,9 @@ LLM:
     # 定义LLM API类型
     type: openai
     # 可在这里找到你的api key https://platform.deepseek.com/
-    model_name: deepseek-chat
-    url: https://api.deepseek.com
-    api_key: 你的deepseek web key
+    model_name: deepseek-ai/DeepSeek-V3
+    url: https://api.siliconflow.cn/v1
+    api_key: sk-nfkbhbglpgjbvbqksawuoeyqrwwymmoxnutuppenooptceyw
   ChatGLMLLM:
     # 定义LLM API类型
     type: openai
