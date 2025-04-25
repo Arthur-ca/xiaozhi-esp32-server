@@ -1,4 +1,5 @@
 import openai
+import re
 from openai.types import CompletionUsage
 from config.logger import setup_logging
 from core.utils.util import check_model_key
@@ -18,7 +19,6 @@ KNOWLEDGE_KEYWORDS = [
     "孕妇", "怀孕", "妊娠", "胎儿", "产前", "孕期", "产检", "胎心", "唐筛", "孕期营养", "孕妇饮食", "孕期运动", "孕期症状"
 ]
 
-
 class LLMProvider(LLMProviderBase):
     def __init__(self, config):
         self.model_name = config.get("model_name")
@@ -36,31 +36,26 @@ class LLMProvider(LLMProviderBase):
             max_tokens = 500
         self.max_tokens = max_tokens
         check_model_key("LLM", self.api_key)
-        # 初始化 OpenAI 客户端
         self.client = openai.OpenAI(api_key=self.api_key, base_url=self.base_url)
 
+        # 初始化 RAG 模型
         model_path = Path(__file__).resolve().parent.parent.parent.parent.parent / "models/bge-large-zh"
-        logger.info(f"模型路径: {model_path}")
-        # 初始化 HuggingFace Embedding
         embedding_model = HuggingFaceEmbeddings(
             model_name=str(model_path),
-            # model_name="BAAI/bge-base-zh",
             model_kwargs={"device": "cpu"}
         )
-        logger.info("Embedding 模型加载完成")
+        logger.info("[RAG] Embedding 模型加载完成")
 
-        # 加载本地 FAISS 向量库
         faiss_path = Path(__file__).resolve().parent.parent.parent.parent.parent / "data/faiss_index_DeepSeek"
         if not faiss_path.exists():
             raise FileNotFoundError(f"未找到向量库: {faiss_path}")
-        
+
         self.vectorstore = FAISS.load_local(
             str(faiss_path),
             embedding_model,
             allow_dangerous_deserialization=True
         )
 
-        # 构建 RAG 检索链
         self.qa_chain = RetrievalQA.from_chain_type(
             llm=ChatOpenAI(
                 api_key=self.api_key,
@@ -72,44 +67,59 @@ class LLMProvider(LLMProviderBase):
             chain_type="stuff",
             return_source_documents=True,
         )
-        logger.info(f"LLMProvider 初始化完成")
-
-    def response(self, session_id, dialogue):
-        query = dialogue[-1]["content"] if dialogue else ""
-        if not query.strip():
-            return "请输入问题。"
-
-        if self._is_knowledge_query(query):
-            logger.info(f"[回答来源] 使用 RAG 模型回答: {query}")
-            return self.rag_response(query)
-        else:
-            logger.info(f"[回答来源] 使用 OpenAI 模型回答: {query}")
-            return self.openai_response(dialogue)
+        logger.info("[RAG] 检索链初始化完成")
 
     def _is_knowledge_query(self, query: str) -> bool:
-        return any(kw in query for kw in KNOWLEDGE_KEYWORDS)
+        matched_keywords = [kw for kw in KNOWLEDGE_KEYWORDS if kw in query]
+        logger.info(f"[RAG-FILTER] 匹配关键词: {matched_keywords}")
+        return bool(matched_keywords)
+    
+    def clean_rag_text(self, text: str) -> str:
+        """清理RAG输出中的Markdown符号,让TTS更自然"""
+        text = re.sub(r'#', '', text)  # 去掉 #
+        text = re.sub(r'\*\*(.*?)\*\*', r'\1', text)  # 去掉 **加粗**
+        text = re.sub(r'^\s*-\s*', '', text, flags=re.MULTILINE)  # 去掉每行开头的 -
+        text = re.sub(r'\*', '', text)  # 去掉孤立的 *
+        text = re.sub(r'\n{2,}', '\n', text)  # 多个连续换行变一个
+        return text.strip()
 
-    def rag_response(self, query: str) -> str:
+    def rag_response_stream(self, query: str):
+        logger.info(f"[RAG-STREAM] 开始流式处理查询: {query}")
         try:
             result = self.qa_chain.invoke({"query": query})
-            return result["result"]
-        except Exception as e:
-            logger.bind(tag=TAG).error(f"RAG模型出错: {e}")
-            return "RAG模型处理失败"
+            full_answer = result.get("result", "")
+            logger.info("[RAG-STREAM] 模型调用成功")
 
-    def openai_response(self, session_id, dialogue):
+            cleaned_text = self.clean_rag_text(full_answer)
+
+            buffer = ""
+            for sentence in re.split(r'(。|！|\!|\\?|\\？)', cleaned_text):
+                if sentence.strip():
+                    buffer += sentence
+                    if len(buffer) >= 100:
+                        yield buffer.strip(), None
+                        buffer = ""
+
+            # 输出剩余的
+            if buffer.strip():
+                yield buffer.strip(), None
+
+        except Exception as e:
+            logger.error(f"[RAG-STREAM] 流式处理失败: {e}")
+            yield "【RAG模型处理失败】", None
+
+    def response(self, session_id, dialogue):
+        logger.info("[OPENAI] 调用 response")
         try:
             responses = self.client.chat.completions.create(
                 model=self.model_name,
                 messages=dialogue,
-                stream=False,
+                stream=True,
                 max_tokens=self.max_tokens,
             )
-
             is_active = True
             for chunk in responses:
                 try:
-                    # 检查是否存在有效的choice且content不为空
                     delta = (
                         chunk.choices[0].delta
                         if getattr(chunk, "choices", None)
@@ -119,7 +129,6 @@ class LLMProvider(LLMProviderBase):
                 except IndexError:
                     content = ""
                 if content:
-                    # 处理标签跨多个chunk的情况
                     if "<think>" in content:
                         is_active = False
                         content = content.split("<think>")[0]
@@ -128,29 +137,36 @@ class LLMProvider(LLMProviderBase):
                         content = content.split("</think>")[-1]
                     if is_active:
                         yield content
-
         except Exception as e:
-            logger.bind(tag=TAG).error(f"Error in response generation: {e}")
+            logger.error(f"[OPENAI] response 模式失败: {e}")
 
     def response_with_functions(self, session_id, dialogue, functions=None):
+        logger.info("[OPENAI] 调用 response_with_functions")
         try:
+            query = dialogue[-1]["content"] if dialogue else ""
+            logger.info(f"[OPENAI] 收到请求: {query}")
+
+            if self._is_knowledge_query(query):
+                logger.info("[OPENAI] 命中关键词，使用 RAG 流式模型")
+                for chunk, _ in self.rag_response_stream(query):
+                    yield chunk, None
+                return
+
+            logger.info("[OPENAI] 未命中关键词，使用 function 模式")
             stream = self.client.chat.completions.create(
                 model=self.model_name, messages=dialogue, stream=True, tools=functions
             )
 
             for chunk in stream:
-                # 检查是否存在有效的choice且content不为空
                 if getattr(chunk, "choices", None):
                     yield chunk.choices[0].delta.content, chunk.choices[0].delta.tool_calls
-                # 存在 CompletionUsage 消息时，生成 Token 消耗 log
                 elif isinstance(getattr(chunk, 'usage', None), CompletionUsage):
                     usage_info = getattr(chunk, 'usage', None)
-                    logger.bind(tag=TAG).info(
-                        f"Token 消耗：输入 {getattr(usage_info, 'prompt_tokens', '未知')}，" 
+                    logger.info(
+                        f"[OPENAI] Token 使用情况：输入 {getattr(usage_info, 'prompt_tokens', '未知')}，"
                         f"输出 {getattr(usage_info, 'completion_tokens', '未知')}，"
-                        f"共计 {getattr(usage_info, 'total_tokens', '未知')}"
+                        f"总计 {getattr(usage_info, 'total_tokens', '未知')}"
                     )
-
         except Exception as e:
-            logger.bind(tag=TAG).error(f"Error in function call streaming: {e}")
+            logger.error(f"[OPENAI] Function 模式调用失败: {e}")
             yield f"【OpenAI服务响应异常: {e}】", None
