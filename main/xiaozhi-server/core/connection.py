@@ -30,6 +30,7 @@ from core.mcp.manager import MCPManager
 from config.config_loader import get_private_config_from_api
 from config.manage_api_client import DeviceNotFoundException, DeviceBindException
 from core.utils.output_counter import add_device_output
+from core.utils.chat_history import ChatHistoryManager
 
 TAG = __name__
 
@@ -116,6 +117,8 @@ class ConnectionHandler:
             int(self.config.get("close_connection_no_voice_time", 120)) + 60
         )  # 在原来第一道关闭的基础上加60秒，进行二道关闭
 
+        self.chat_history_manager = ChatHistoryManager(config.get('database', {}))
+
     async def handle_connection(self, ws):
         try:
             # 获取并验证headers
@@ -196,9 +199,29 @@ class ConnectionHandler:
     async def _save_and_close(self, ws):
         """保存记忆并关闭连接"""
         try:
+            # 保存记忆
             await self.memory.save_memory(self.dialogue.dialogue)
+            
+            # 从 headers 中获取用户ID和设备ID
+            device_id = self.headers.get("device-id")
+            client_id = self.headers.get("client-id")
+            
+            # 使用 client_id 作为 user_id
+            self.user_id = client_id
+            
+            # 异步保存对话历史
+            if self.user_id:
+                self.logger.bind(tag=TAG).info(f"准备保存对话历史 - 用户ID: {self.user_id}, 设备ID: {device_id}")
+                asyncio.create_task(self.chat_history_manager.save_chat_history(
+                    user_id=self.user_id,
+                    agent_id=getattr(self, 'agent_id', None),
+                    device_id=device_id,
+                    messages=self.dialogue.dialogue
+                ))
+            else:
+                self.logger.bind(tag=TAG).warning("无法保存对话历史：未找到用户ID")
         except Exception as e:
-            self.logger.bind(tag=TAG).error(f"保存记忆失败: {e}")
+            self.logger.bind(tag=TAG).error(f"保存失败: {e}")
         finally:
             await self.close(ws)
 

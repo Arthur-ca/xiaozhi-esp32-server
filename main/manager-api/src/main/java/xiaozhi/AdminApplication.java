@@ -8,6 +8,6 @@ public class AdminApplication {
 
     public static void main(String[] args) {
         SpringApplication.run(AdminApplication.class, args);
-        System.out.println("http://192.168.1.5:8002/xiaozhi/doc.html");
+        System.out.println("http://192.168.1.6:8002/xiaozhi/doc.html");
     }
 }

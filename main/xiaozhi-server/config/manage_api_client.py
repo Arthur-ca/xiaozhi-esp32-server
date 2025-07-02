@@ -3,6 +3,8 @@ import time
 from typing import Optional, Dict
 
 import httpx
+import requests
+import logging
 
 TAG = __name__
 
