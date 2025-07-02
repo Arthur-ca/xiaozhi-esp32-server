@@ -172,5 +172,10 @@ main/manager-api/.vscode
 main/manager-web/.webpack_cache/
 main/xiaozhi-server/mysql
 uploadfile
+/main/xiaozhi-server/models/bge-large-zh
+/Escape
+Unity_ASR_部署说明.md
+main/xiaozhi-server/models/bge-large-zh.rar
 *.json
 .vscode
+

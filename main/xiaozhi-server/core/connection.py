@@ -36,7 +36,8 @@ from config.config_loader import get_private_config_from_api
 from core.providers.tts.dto.dto import ContentType, TTSMessageDTO, SentenceType
 from config.logger import setup_logging, build_module_string, update_module_string
 from config.manage_api_client import DeviceNotFoundException, DeviceBindException
-
+from core.utils.output_counter import add_device_output
+from core.utils.chat_history import ChatHistoryManager
 
 TAG = __name__
 
@@ -149,6 +150,8 @@ class ConnectionHandler:
         # {"mcp":true} 表示启用MCP功能
         self.features = None
 
+        self.chat_history_manager = ChatHistoryManager(config.get('database', {}))
+
     async def handle_connection(self, ws):
         try:
             # 获取并验证headers
@@ -219,25 +222,29 @@ class ConnectionHandler:
     async def _save_and_close(self, ws):
         """保存记忆并关闭连接"""
         try:
-            if self.memory:
-                # 使用线程池异步保存记忆
-                def save_memory_task():
-                    try:
-                        # 创建新事件循环（避免与主循环冲突）
-                        loop = asyncio.new_event_loop()
-                        asyncio.set_event_loop(loop)
-                        loop.run_until_complete(
-                            self.memory.save_memory(self.dialogue.dialogue)
-                        )
-                    except Exception as e:
-                        self.logger.bind(tag=TAG).error(f"保存记忆失败: {e}")
-                    finally:
-                        loop.close()
-
-                # 启动线程保存记忆，不等待完成
-                threading.Thread(target=save_memory_task, daemon=True).start()
+            # 保存记忆
+            await self.memory.save_memory(self.dialogue.dialogue)
+            
+            # 从 headers 中获取用户ID和设备ID
+            device_id = self.headers.get("device-id")
+            client_id = self.headers.get("client-id")
+            
+            # 使用 client_id 作为 user_id
+            self.user_id = client_id
+            
+            # 异步保存对话历史
+            if self.user_id:
+                self.logger.bind(tag=TAG).info(f"准备保存对话历史 - 用户ID: {self.user_id}, 设备ID: {device_id}")
+                asyncio.create_task(self.chat_history_manager.save_chat_history(
+                    user_id=self.user_id,
+                    agent_id=getattr(self, 'agent_id', None),
+                    device_id=device_id,
+                    messages=self.dialogue.dialogue
+                ))
+            else:
+                self.logger.bind(tag=TAG).warning("无法保存对话历史：未找到用户ID")
         except Exception as e:
-            self.logger.bind(tag=TAG).error(f"保存记忆失败: {e}")
+            self.logger.bind(tag=TAG).error(f"保存失败: {e}")
         finally:
             # 立即关闭连接，不等待记忆保存完成
             await self.close(ws)

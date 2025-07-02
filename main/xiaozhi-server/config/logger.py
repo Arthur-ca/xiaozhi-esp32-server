@@ -37,7 +37,8 @@ def build_module_string(selected_module):
 def formatter(record):
     """为没有 tag 的日志添加默认值"""
     record["extra"].setdefault("tag", record["name"])
-    return record["message"]
+    # return record["message"]
+    return True
 
 
 def setup_logging():
