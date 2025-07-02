@@ -104,12 +104,16 @@ VAD:
 
 参考教程[ESP32设备与HomeAssistant集成指南](./homeassistant-integration.md)
 
-### 8、更多问题，可联系我们反馈 💬
+### 8、如何开启手机注册智控台 📱
 
-我们的联系方式放在[百度网盘中,点击前往](https://pan.baidu.com/s/1x6USjvP1nTRsZ45XlJu65Q)，提取码是`223y`。
+参考教程[阿里云短信集成指南](./ali-sms-integration.md)
 
-网盘里有"硬件烧录QQ群"、"开源服务端交流群"、"产品建议联系人" 三张图片，请根据需要选择加入。
+### 9、如何开启视觉模型实现拍照识物 📷
 
-- 硬件烧录QQ群：适用于硬件烧录问题
-- 开源服务端交流群：适用于服务端问题
-- 产品建议联系人：适用于产品功能、产品设计等建议 
+参考教程[视觉模型使用指南](./mcp-vision-integration.md)
+
+### 10、更多问题，可联系我们反馈 💬
+
+可以在[issues](https://github.com/xinnan-tech/xiaozhi-esp32-server/issues)提交您的问题。
+
+也可以发邮件我们取得联系：huangrongzhuang@xin-nan.com

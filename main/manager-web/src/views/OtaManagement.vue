@@ -15,15 +15,10 @@
             <div class="content-panel">
                 <div class="content-area">
                     <el-card class="params-card" shadow="never">
-                            <el-table
-                                ref="paramsTable"
-                                :data="paramsList"
-                                class="transparent-table"
-                                v-loading="loading"
-                                element-loading-text="拼命加载中"
-                                element-loading-spinner="el-icon-loading"
-                                element-loading-background="rgba(255, 255, 255, 0.7)"
-                                :header-cell-class-name="headerCellClassName">
+                        <el-table ref="paramsTable" :data="paramsList" class="transparent-table" v-loading="loading"
+                            element-loading-text="拼命加载中" element-loading-spinner="el-icon-loading"
+                            element-loading-background="rgba(255, 255, 255, 0.7)"
+                            :header-cell-class-name="headerCellClassName">
                             <el-table-column label="选择" align="center" width="120">
                                 <template slot-scope="scope">
                                     <el-checkbox v-model="scope.row.selected"></el-checkbox>
@@ -46,6 +41,11 @@
                             <el-table-column label="创建时间" prop="createDate" align="center">
                                 <template slot-scope="scope">
                                     {{ formatDate(scope.row.createDate) }}
+                                </template>
+                            </el-table-column>
+                            <el-table-column label="更新时间" prop="updateDate" align="center">
+                                <template slot-scope="scope">
+                                    {{ formatDate(scope.row.updateDate) }}
                                 </template>
                             </el-table-column>
                             <el-table-column label="操作" align="center">
@@ -96,8 +96,8 @@
         </div>
 
         <!-- 新增/编辑固件对话框 -->
-        <firmware-dialog :title="dialogTitle" :visible.sync="dialogVisible" :form="firmwareForm" @submit="handleSubmit"
-            @cancel="dialogVisible = false" />
+        <firmware-dialog :title="dialogTitle" :visible.sync="dialogVisible" :form="firmwareForm"
+            :firmware-types="firmwareTypes" @submit="handleSubmit" @cancel="dialogVisible = false" />
         <el-footer>
             <version-footer />
         </el-footer>
@@ -109,7 +109,6 @@ import Api from "@/apis/api";
 import FirmwareDialog from "@/components/FirmwareDialog.vue";
 import HeaderBar from "@/components/HeaderBar.vue";
 import VersionFooter from "@/components/VersionFooter.vue";
-import { FIRMWARE_TYPES } from "@/utils";
 import { formatDate, formatFileSize } from "@/utils/format";
 
 export default {
@@ -136,10 +135,12 @@ export default {
                 remark: "",
                 firmwarePath: ""
             },
+            firmwareTypes: [],
         };
     },
     created() {
         this.fetchFirmwareList();
+        this.getFirmwareTypes();
     },
 
     computed: {
@@ -387,9 +388,18 @@ export default {
         },
         formatDate,
         formatFileSize,
+        async getFirmwareTypes() {
+            try {
+                const res = await Api.dict.getDictDataByType('FIRMWARE_TYPE')
+                this.firmwareTypes = res.data
+            } catch (error) {
+                console.error('获取固件类型失败:', error)
+                this.$message.error(error.message || '获取固件类型失败')
+            }
+        },
         getFirmwareTypeName(type) {
-            const firmwareType = FIRMWARE_TYPES.find(item => item.key === type);
-            return firmwareType ? firmwareType.name : type;
+            const firmwareType = this.firmwareTypes.find(item => item.key === type)
+            return firmwareType ? firmwareType.name : type
         },
     },
 };

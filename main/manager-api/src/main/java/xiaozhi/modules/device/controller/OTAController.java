@@ -28,7 +28,6 @@ import xiaozhi.modules.device.dto.DeviceReportReqDTO;
 import xiaozhi.modules.device.dto.DeviceReportRespDTO;
 import xiaozhi.modules.device.entity.DeviceEntity;
 import xiaozhi.modules.device.service.DeviceService;
-import xiaozhi.modules.device.utils.NetworkUtil;
 import xiaozhi.modules.sys.service.SysParamsService;
 
 @Tag(name = "设备管理", description = "OTA 相关接口")
@@ -53,7 +52,7 @@ public class OTAController {
             clientId = deviceId;
         }
         String macAddress = deviceReportReqDTO.getMacAddress();
-        boolean macAddressValid = NetworkUtil.isMacAddressValid(macAddress);
+        boolean macAddressValid = isMacAddressValid(macAddress);
         // 设备Id和Mac地址应是一致的, 并且必须需要application字段
         if (!deviceId.equals(macAddress) || !macAddressValid || deviceReportReqDTO.getApplication() == null) {
             return createResponse(DeviceReportRespDTO.createError("Invalid OTA request"));
@@ -81,7 +80,11 @@ public class OTAController {
     public ResponseEntity<String> getOTA() {
         String wsUrl = sysParamsService.getValue(Constant.SERVER_WEBSOCKET, true);
         if (StringUtils.isBlank(wsUrl) || wsUrl.equals("null")) {
-            return ResponseEntity.ok("OTA接口不正常，缺少websocket地址");
+            return ResponseEntity.ok("OTA接口不正常，缺少websocket地址，请登录智控台，在参数管理找到【server.websocket】配置");
+        }
+        String otaUrl = sysParamsService.getValue(Constant.SERVER_OTA, true);
+        if (StringUtils.isBlank(otaUrl) || otaUrl.equals("null")) {
+            return ResponseEntity.ok("OTA接口不正常，缺少ota地址，请登录智控台，在参数管理找到【server.ota】配置");
         }
         return ResponseEntity.ok("OTA接口运行正常，websocket集群数量：" + wsUrl.split(";").length);
     }
@@ -97,5 +100,20 @@ public class OTAController {
                 .contentType(MediaType.APPLICATION_JSON)
                 .contentLength(jsonBytes.length)
                 .body(json);
+    }
+
+    /**
+     * 简单判断mac地址是否有效（非严格）
+     * 
+     * @param macAddress
+     * @return
+     */
+    private boolean isMacAddressValid(String macAddress) {
+        if (StringUtils.isBlank(macAddress)) {
+            return false;
+        }
+        // MAC地址通常为12位十六进制数字，可以包含冒号或连字符分隔符
+        String macPattern = "^([0-9A-Za-z]{2}[:-]){5}([0-9A-Za-z]{2})$";
+        return macAddress.matches(macPattern);
     }
 }

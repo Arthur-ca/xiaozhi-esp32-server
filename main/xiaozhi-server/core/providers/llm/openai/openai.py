@@ -1,3 +1,4 @@
+import httpx
 import openai
 import re
 import time
@@ -235,7 +236,12 @@ class LLMProvider(LLMProviderBase):
                 model=self.model_name,
                 messages=dialogue,
                 stream=True,
-                max_tokens=self.max_tokens,
+                max_tokens=kwargs.get("max_tokens", self.max_tokens),
+                temperature=kwargs.get("temperature", self.temperature),
+                top_p=kwargs.get("top_p", self.top_p),
+                frequency_penalty=kwargs.get(
+                    "frequency_penalty", self.frequency_penalty
+                ),
             )
             is_active = True
             for chunk in responses:

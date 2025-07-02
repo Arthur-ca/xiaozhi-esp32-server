@@ -12,22 +12,32 @@ logger = setup_logging()
 class VADProvider(VADProviderBase):
     def __init__(self, config):
         logger.bind(tag=TAG).info("SileroVAD", config)
-        self.model, self.utils = torch.hub.load(
+        self.model, _ = torch.hub.load(
             repo_or_dir=config["model_dir"],
             source="local",
             model="silero_vad",
             force_reload=False,
         )
-        (get_speech_timestamps, _, _, _, _) = self.utils
 
         self.decoder = opuslib_next.Decoder(16000, 1)
-        self.vad_threshold = float(config.get("threshold", 0.5))
-        self.silence_threshold_ms = int(config.get("min_silence_duration_ms", 1000))
+
+        # 处理空字符串的情况
+        threshold = config.get("threshold", "0.5")
+        min_silence_duration_ms = config.get("min_silence_duration_ms", "1000")
+
+        self.vad_threshold = float(threshold) if threshold else 0.5
+        self.silence_threshold_ms = (
+            int(min_silence_duration_ms) if min_silence_duration_ms else 1000
+        )
 
     def is_vad(self, conn, opus_packet):
         try:
             pcm_frame = self.decoder.decode(opus_packet, 960)
             conn.client_audio_buffer.extend(pcm_frame)  # 将新数据加入缓冲区
+
+            # 确保帧计数器存在
+            if not hasattr(conn, "client_voice_frame_count"):
+                conn.client_voice_frame_count = 0
 
             # 处理缓冲区中的完整帧（每次处理512采样点）
             client_have_voice = False
@@ -44,18 +54,24 @@ class VADProvider(VADProviderBase):
                 # 检测语音活动
                 with torch.no_grad():
                     speech_prob = self.model(audio_tensor, 16000).item()
-                client_have_voice = speech_prob >= self.vad_threshold
+                is_voice = speech_prob >= self.vad_threshold
 
-                # 如果之前有声音，但本次没有声音，且与上次有声音的时间查已经超过了静默阈值，则认为已经说完一句话
+                if is_voice:
+                    conn.client_voice_frame_count += 1
+                else:
+                    conn.client_voice_frame_count = 0
+
+                # 只有连续4帧检测到语音才认为有语音
+                client_have_voice = conn.client_voice_frame_count >= 4
+
+                # 如果之前有声音，但本次没有声音，且与上次有声音的时间差已经超过了静默阈值，则认为已经说完一句话
                 if conn.client_have_voice and not client_have_voice:
-                    stop_duration = (
-                        time.time() * 1000 - conn.client_have_voice_last_time
-                    )
+                    stop_duration = time.time() * 1000 - conn.last_activity_time
                     if stop_duration >= self.silence_threshold_ms:
                         conn.client_voice_stop = True
                 if client_have_voice:
                     conn.client_have_voice = True
-                    conn.client_have_voice_last_time = time.time() * 1000
+                    conn.last_activity_time = time.time() * 1000
 
             return client_have_voice
         except opuslib_next.OpusError as e:

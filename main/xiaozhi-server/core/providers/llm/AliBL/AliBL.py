@@ -2,6 +2,7 @@ from config.logger import setup_logging
 from http import HTTPStatus
 from dashscope import Application
 from core.providers.llm.base import LLMProviderBase
+from core.utils.util import check_model_key
 
 TAG = __name__
 logger = setup_logging()
@@ -14,6 +15,7 @@ class LLMProvider(LLMProviderBase):
         self.base_url = config.get("base_url")
         self.is_No_prompt = config.get("is_no_prompt")
         self.memory_id = config.get("ali_memory_id")
+        check_model_key("AliBLLLM", self.api_key)
 
     def response(self, session_id, dialogue):
         try:
@@ -59,5 +61,6 @@ class LLMProvider(LLMProviderBase):
             yield "【LLM服务响应异常】"
 
     def response_with_functions(self, session_id, dialogue, functions=None):
-        logger.bind(tag=TAG).info(f"阿里百练暂未实现完整的工具调用（function call）")
-        return self.response(session_id, dialogue)
+        logger.bind(tag=TAG).error(
+            f"阿里百练暂未实现完整的工具调用（function call），建议使用其他意图识别"
+        )
