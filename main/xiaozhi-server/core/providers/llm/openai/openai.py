@@ -11,6 +11,7 @@ from langchain_huggingface import HuggingFaceEmbeddings
 from langchain.chains import RetrievalQA
 from langchain_openai import ChatOpenAI
 from langchain.prompts import PromptTemplate
+from sentence_transformers import CrossEncoder
 from pathlib import Path
 import mysql.connector
 from mysql.connector import Error
@@ -24,10 +25,10 @@ KNOWLEDGE_KEYWORDS = [
 ]
 
 # 优化1: 自定义RAG提示词模板，提供更明确的指导
+# 新模板强调先解释医学症状含义，再给出注意事项与治疗原则
 RAG_PROMPT_TEMPLATE = """
-请基于以下参考信息回答用户的问题。
-如果参考信息中没有相关内容，请直接说明您不知道，不要编造信息。
-回答要简洁、准确、有帮助性，并直接针对用户问题给出答案。
+请先回答流血或恶心在医学上的含义，然后给出相应的注意事项及治疗原则。
+请基于以下参考信息进行回答，如信息不足请说明不知道，不要编造。
 
 参考信息:
 {context}
@@ -74,6 +75,7 @@ class LLMProvider(LLMProviderBase):
     # 类级别的模型和向量库，避免重复加载
     _embedding_model = None
     _vectorstore = None
+    _cross_encoder = None
     
     def __init__(self, config):
         self.model_name = config.get("model_name")
@@ -158,6 +160,34 @@ class LLMProvider(LLMProviderBase):
         matched_keywords = [kw for kw in KNOWLEDGE_KEYWORDS if kw in query]
         logger.info(f"[RAG-FILTER] 匹配关键词: {matched_keywords}")
         return bool(matched_keywords)
+
+    def extract_keywords(self, query: str) -> str:
+        """利用 LLM 提取问题中的关键医学词汇"""
+        try:
+            prompt = f"请提取以下问题中的医学关键词，使用逗号分隔：{query}"
+            resp = self.client.chat.completions.create(
+                model=self.model_name,
+                messages=[{"role": "user", "content": prompt}],
+            )
+            keywords = resp.choices[0].message.content.strip()
+            self.save_text_to_mysql("74:56:3c:12:c6:3d", "keywords", keywords)
+            return keywords
+        except Exception as e:
+            logger.error(f"[RAG] 关键词提取失败: {e}")
+            return query
+
+    def rerank_docs(self, query: str, docs, top_k: int = 2):
+        """使用 CrossEncoder 对检索到的文档重新排序"""
+        if not docs:
+            return []
+        if LLMProvider._cross_encoder is None:
+            LLMProvider._cross_encoder = CrossEncoder(
+                "cross-encoder/ms-marco-MiniLM-L-6-v2", device="cpu"
+            )
+        pairs = [[query, d.page_content] for d in docs]
+        scores = LLMProvider._cross_encoder.predict(pairs)
+        ranked = sorted(zip(docs, scores), key=lambda x: x[1], reverse=True)
+        return [d for d, _ in ranked[:top_k]]
     
     def clean_rag_text(self, text: str) -> str:
         """清理RAG输出中的Markdown符号,让TTS更自然"""
@@ -171,61 +201,66 @@ class LLMProvider(LLMProviderBase):
     # 优化6: 实现真正的流式RAG响应
     def rag_response_stream(self, query: str):
         logger.info(f"[RAG-STREAM] 开始流式处理查询: {query}")
-        
+
         # 检查缓存
         cached_result = LLMProvider._query_cache.get(query)
         if cached_result:
             logger.info("[RAG-STREAM] 命中缓存，直接返回缓存结果")
-            cleaned_text = self.clean_rag_text(cached_result)
-            
-            # 模拟流式返回缓存结果
+            resp_text = cached_result["response"] if isinstance(cached_result, dict) else cached_result
+            cleaned_text = self.clean_rag_text(resp_text)
+
             buffer = ""
             for sentence in re.split(r'(。|！|\!|\\?|\\？)', cleaned_text):
                 if sentence.strip():
                     buffer += sentence
-                    if len(buffer) >= 50:  # 减小缓冲区大小，更快返回第一个结果
+                    if len(buffer) >= 50:
                         yield buffer.strip(), None
                         buffer = ""
-            
+
             if buffer.strip():
                 yield buffer.strip(), None
             return
-        
+
         try:
-            # 步骤1: 先执行检索，获取相关文档
+            keywords = self.extract_keywords(query)
             start_time = time.time()
-            relevant_docs = self.retriever.get_relevant_documents(query)
+            relevant_docs = self.retriever.get_relevant_documents(keywords)
+            relevant_docs = self.rerank_docs(keywords, relevant_docs)
             retrieval_time = time.time() - start_time
-            logger.info(f"[RAG-STREAM] 检索完成，耗时: {retrieval_time:.2f}秒，找到{len(relevant_docs)}个相关文档")
-            
-            # 步骤2: 构建提示词
-            context = "\n\n".join([doc.page_content for doc in relevant_docs])
-            prompt_input = OPTIMIZED_PROMPT.format(context=context, question=query)
-            
-            # 步骤3: 流式调用LLM
+            logger.info(
+                f"[RAG-STREAM] 检索完成，耗时: {retrieval_time:.2f}秒，找到{len(relevant_docs)}个相关文档"
+            )
+
+            if relevant_docs:
+                context = "\n\n".join([doc.page_content for doc in relevant_docs])
+                prompt_input = OPTIMIZED_PROMPT.format(context=context, question=query)
+            else:
+                prompt_input = query
+
             start_time = time.time()
             stream = self.client.chat.completions.create(
                 model=self.model_name,
                 messages=[{"role": "user", "content": prompt_input}],
                 stream=True,
                 temperature=0.2,
-                max_tokens=self.max_tokens
+                max_tokens=self.max_tokens,
             )
-            
-            # 步骤4: 流式返回结果
+
             full_response = ""
             for chunk in stream:
-                if hasattr(chunk.choices[0].delta, 'content') and chunk.choices[0].delta.content:
+                if hasattr(chunk.choices[0].delta, "content") and chunk.choices[0].delta.content:
                     content = chunk.choices[0].delta.content
                     full_response += content
                     yield content, None
-            
+
             generation_time = time.time() - start_time
             logger.info(f"[RAG-STREAM] 生成完成，耗时: {generation_time:.2f}秒")
-            
-            # 缓存完整响应
-            LLMProvider._query_cache.set(query, full_response)
-            
+
+            LLMProvider._query_cache.set(
+                query, {"keywords": keywords, "response": full_response}
+            )
+            self.save_text_to_mysql("74:56:3c:12:c6:3d", "res", full_response)
+
         except Exception as e:
             logger.error(f"[RAG-STREAM] 流式处理失败: {e}")
             yield "【RAG模型处理失败】", None
