@@ -1,3 +1,4 @@
+import httpx
 import openai
 import re
 import time
@@ -12,8 +13,6 @@ from langchain.chains import RetrievalQA
 from langchain_openai import ChatOpenAI
 from langchain.prompts import PromptTemplate
 from pathlib import Path
-import mysql.connector
-from mysql.connector import Error
 
 TAG = __name__
 logger = setup_logging()
@@ -237,7 +236,12 @@ class LLMProvider(LLMProviderBase):
                 model=self.model_name,
                 messages=dialogue,
                 stream=True,
-                max_tokens=self.max_tokens,
+                max_tokens=kwargs.get("max_tokens", self.max_tokens),
+                temperature=kwargs.get("temperature", self.temperature),
+                top_p=kwargs.get("top_p", self.top_p),
+                frequency_penalty=kwargs.get(
+                    "frequency_penalty", self.frequency_penalty
+                ),
             )
             is_active = True
             for chunk in responses:
@@ -267,7 +271,7 @@ class LLMProvider(LLMProviderBase):
         try:
             query = dialogue[-1]["content"] if dialogue else ""
             logger.info(f"[OPENAI] 收到请求: {query}")
-            self.save_text_to_mysql("74:56:3c:12:c6:3d","req",query)
+
             if self._is_knowledge_query(query):
                 logger.info("[OPENAI] 命中关键词，使用 RAG 流式模型")
                 for chunk, _ in self.rag_response_stream(query):
@@ -292,45 +296,3 @@ class LLMProvider(LLMProviderBase):
         except Exception as e:
             logger.error(f"[OPENAI] Function 模式调用失败: {e}")
             yield f"【OpenAI服务响应异常: {e}】", None
-
-    def save_text_to_mysql(self,mac,types, content_text):
-        """
-        将文本内容存入MySQL的ai_chat_content表
-
-        参数:
-            content_text (str): 要存储的文本内容
-        """
-        connection = None
-        cursor = None
-        try:
-            # 连接MySQL数据库
-            connection = mysql.connector.connect(
-                host='localhost',
-                port=3306,
-                user='root',
-                password='2025Supper666'
-            )
-
-            if connection.is_connected():
-                cursor = connection.cursor()
-
-                # 选择数据库（假设数据库名是ai_chat）
-                cursor.execute("USE xiaozhi_esp32_server")
-
-                # 插入数据到ai_chat_content表
-                insert_query = "INSERT INTO ai_chat_content (mac,types,content) VALUES (%s,%s,%s)"
-                cursor.execute(insert_query, (mac,types,content_text,))
-
-                # 提交事务
-                connection.commit()
-                logger.bind(tag=TAG).info(f"文本内容已成功存入数据库: {content_text}")
-
-        except Error as e:
-            logger.bind(tag=TAG).error(f"数据库保存失败: {content_text}, 错误: {e}")
-
-        finally:
-            # 关闭连接
-            if cursor:
-                cursor.close()
-            if connection and connection.is_connected():
-                connection.close()
