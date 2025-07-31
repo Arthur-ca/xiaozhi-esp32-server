@@ -163,8 +163,13 @@ class LLMProvider(LLMProviderBase):
         # 保存检索器的引用，用于真正的流式响应
         self.retriever = retriever
         self.llm = llm
-        self.reranker = FlagReranker('BAAI/bge-reranker-v2-m3', devices=["cpu"])
-        logger.info(f"[RAG] Reranker 加载完成: {self.reranker_model}, device={device}")
+        reranker_model_path = Path(__file__).resolve().parent.parent.parent.parent.parent / "models/bge-reranker-v2-m3"
+        if FlagReranker is not None:
+            self.reranker = FlagReranker(
+                model_name = str(reranker_model_path), 
+                devices=["cpu"]
+                )
+            logger.info(f"[RAG] Reranker 加载完成: {self.reranker_model}, device={device}")
 
     def _is_knowledge_query(self, query: str) -> bool:
         matched_keywords = [kw for kw in KNOWLEDGE_KEYWORDS if kw in query]
