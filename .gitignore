@@ -163,7 +163,7 @@ main/manager-api/.vscode
 main/xiaozhi-server/data/faiss_index_DeepSeek/
 main/xiaozhi-server/models/bge-large-zh/model.safetensors
 main/xiaozhi-server/models/bge-large-zh/pytorch_model.bin
-
+main/xiaozhi-server/models/bge-reranker-v2-m3/model.safetensors
 
 # Ignore webpack cache directory
 main/manager-web/.webpack_cache/
