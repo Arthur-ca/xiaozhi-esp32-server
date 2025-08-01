@@ -166,7 +166,7 @@ class LLMProvider(LLMProviderBase):
         reranker_model_path = Path(__file__).resolve().parent.parent.parent.parent.parent / "models/bge-reranker-v2-m3"
         if FlagReranker is not None:
             self.reranker = FlagReranker(
-                model_name = str(reranker_model_path), 
+                model_name_or_path = str(reranker_model_path), 
                 devices=["cpu"]
                 )
             logger.info(f"[RAG] Reranker 加载完成: {self.reranker_model}, device={device}")
