@@ -21,7 +21,7 @@ logger = setup_logging()
 
 # 关键词触发列表
 KNOWLEDGE_KEYWORDS = [
-    "孕妇", "怀孕", "妊娠", "胎儿", "产前", "孕期", "产检", "胎心", "唐筛", "孕期营养", "孕妇饮食", "孕期运动", "孕期症状"
+    "孕妇", "怀孕", "妊娠", "胎儿", "产前", "孕期", "产检", "胎心", "唐筛", "孕期营养", "孕妇饮食", "孕期运动", "孕期症状","恶心","呕吐"
 ]
 
 # 优化1: 自定义RAG提示词模板，提供更明确的指导
@@ -91,14 +91,14 @@ class LLMProvider(LLMProviderBase):
             self.base_url = config.get("base_url")
         else:
             self.base_url = config.get("url")
-        max_tokens = config.get("max_tokens")
-        if max_tokens is None or max_tokens == "":
-            max_tokens = 500
-        try:
-            max_tokens = int(max_tokens)
-        except (ValueError, TypeError):
-            max_tokens = 500
-        self.max_tokens = max_tokens
+        # max_tokens = config.get("max_tokens")
+        # if max_tokens is None or max_tokens == "":
+        #     max_tokens = 500
+        # try:
+        #     max_tokens = int(max_tokens)
+        # except (ValueError, TypeError):
+        #     max_tokens = 500
+        # self.max_tokens = max_tokens
         check_model_key("LLM", self.api_key)
         self.client = openai.OpenAI(api_key=self.api_key, base_url=self.base_url)
         self.reranker_model = config.get("reranker_model", "BAAI/bge-reranker-v2-m3")
@@ -296,7 +296,7 @@ class LLMProvider(LLMProviderBase):
             
             # 步骤2: 构建提示词
             context = "\n\n".join([doc.page_content for doc in relevant_docs])
-            prompt_input = OPTIMIZED_PROMPT.format(context=context, question=query)
+            prompt_input = OPTIMIZED_PROMPT.format(context=context, question=query, is_knowledge=self._is_knowledge_query(query))
             
             # 步骤3: 流式调用LLM
             start_time = time.time()
