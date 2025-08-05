@@ -91,14 +91,14 @@ class LLMProvider(LLMProviderBase):
             self.base_url = config.get("base_url")
         else:
             self.base_url = config.get("url")
-        # max_tokens = config.get("max_tokens")
-        # if max_tokens is None or max_tokens == "":
-        #     max_tokens = 500
-        # try:
-        #     max_tokens = int(max_tokens)
-        # except (ValueError, TypeError):
-        #     max_tokens = 500
-        # self.max_tokens = max_tokens
+        max_tokens = config.get("max_tokens")
+        if max_tokens is None or max_tokens == "":
+            max_tokens = 500
+        try:
+            max_tokens = int(max_tokens)
+        except (ValueError, TypeError):
+            max_tokens = 500
+        self.max_tokens = max_tokens
         check_model_key("LLM", self.api_key)
         self.client = openai.OpenAI(api_key=self.api_key, base_url=self.base_url)
         self.reranker_model = config.get("reranker_model", "BAAI/bge-reranker-v2-m3")
