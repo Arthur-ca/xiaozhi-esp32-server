@@ -171,3 +171,5 @@ main/xiaozhi-server/mysql
 uploadfile
 /main/xiaozhi-server/models/bge-large-zh
 /Escape
+.claude/settings.local.json
+/main/xiaozhi-server/models/bge-reranker-v2-m3
