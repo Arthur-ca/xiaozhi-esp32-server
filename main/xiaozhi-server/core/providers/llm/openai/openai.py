@@ -3,6 +3,8 @@ import openai
 import time
 import re
 import os
+import uuid
+from typing import Any, Dict
 from openai.types import CompletionUsage
 from config.logger import setup_logging
 from core.utils.util import check_model_key
@@ -20,6 +22,42 @@ from mysql.connector import Error
 
 TAG = __name__
 logger = setup_logging()
+
+class _StageTimer:
+    """简单阶段计时上下文管理器：记录阶段耗时并打印日志"""
+    def __init__(self, timings: Dict[str, float], name: str, req_id: str = ""):
+        self.timings = timings
+        self.name = name
+        self.req_id = req_id
+        self.t0 = None
+
+    def __enter__(self):
+        self.t0 = time.perf_counter()
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        dt = time.perf_counter() - self.t0
+        self.timings[self.name] = self.timings.get(self.name, 0.0) + dt
+        try:
+            logger.info(f"[TIMING][{self.req_id}] {self.name} took {dt:.3f}s")
+        except Exception:
+            pass
+    
+def _numeric_timings(t: Dict[str, Any]) -> Dict[str, float]:
+    """只保留数值型的阶段耗时，过滤掉 req_id 等非数值项"""
+    out: Dict[str, float] = {}
+    for k, v in t.items():
+        if isinstance(v, (int, float)):
+            try:
+                out[k] = float(v)
+            except Exception:
+                pass
+    return out
+
+def _format_timings(t: Dict[str, Any]) -> str:
+    """把阶段耗时格式化为 'k=0.123s'，自动忽略非数值项"""
+    return ", ".join(f"{k}={float(v):.3f}s" for k, v in t.items() if isinstance(v, (int, float)))
+
 
 # 设置环境变量，关闭 transformers 的提示以避免警告输出。
 # 其中包括“使用 `__call__` 方法比 encode 再 pad 更快”的警告。
@@ -99,9 +137,12 @@ class LLMProvider(LLMProviderBase):
         else:
             self.base_url = config.get("url")
         # 增加timeout的配置项，单位为秒
-        timeout = config.get("timeout", 300)
-        self.timeout = int(timeout) if timeout else 300
+        try:
+            self.timeout = float(config.get("timeout", 30))
+        except Exception:
+            self.timeout = 30
 
+        # 参数初始化
         param_defaults = {
             "max_tokens": (500, int),
             "temperature": (0.7, lambda x: round(float(x), 1)),
@@ -130,81 +171,91 @@ class LLMProvider(LLMProviderBase):
         self.client = openai.OpenAI(api_key=self.api_key, base_url=self.base_url, timeout=httpx.Timeout(self.timeout))
         self.reranker_model = config.get("reranker_model", "BAAI/bge-reranker-v2-m3")
         # 优化3: 延迟加载和共享模型实例
+        self._last_timings = {}
         self._initialize_rag_components()
+        
+
+    def get_last_timings(self) -> Dict[str, float]:
+        """返回最近一次请求的阶段耗时纪录（单位：秒）"""
+        return dict(getattr(self, "_last_timings", {}))
 
     def _initialize_rag_components(self):
+       # 统一放到方法开头，避免作用域问题
+        device = "cpu"  # 有 GPU 可改为 "cuda"
+
         # 只在第一次调用时初始化
+        init_timings: Dict[str, float] = {}
+        req = "init"
+
+        # Embedding 模型加载
         if LLMProvider._embedding_model is None:
-            start_time = time.time()
-            model_path = Path(__file__).resolve().parent.parent.parent.parent.parent / "models/bge-large-zh"
-            
-            logger.info(f"embeding model:{model_path}")
-            # 优化4: 根据环境选择设备
-            # 注意: 如果有GPU，可以将device改为"cuda"以加速嵌入生成
-            device = "cpu"  # 如果有GPU可用，改为"cuda"
-            
-            LLMProvider._embedding_model = HuggingFaceEmbeddings(
-                model_name=str(model_path),
-                model_kwargs={"device": device}
-            )
-            logger.info(f"[RAG] Embedding 模型加载完成，耗时: {time.time() - start_time:.2f}秒")
+            with _StageTimer(init_timings, "embedding_load", req):
+                model_path = Path(__file__).resolve().parent.parent.parent.parent.parent / "models/bge-large-zh"
+                logger.info(f"embeding model:{model_path}")
+                LLMProvider._embedding_model = HuggingFaceEmbeddings(
+                    model_name=str(model_path),
+                    model_kwargs={"device": device}
+                )
+            logger.info(f"[RAG] Embedding 模型加载完成")
 
         if LLMProvider._vectorstore is None:
-            start_time = time.time()
-            faiss_path = Path(__file__).resolve().parent.parent.parent.parent.parent / "data/faiss_index_DeepSeek"
-            if not faiss_path.exists():
-                raise FileNotFoundError(f"未找到向量库: {faiss_path}")
-
-            LLMProvider._vectorstore = FAISS.load_local(
-                str(faiss_path),
-                LLMProvider._embedding_model,
-                allow_dangerous_deserialization=True
-            )
-            logger.info(f"[RAG] 向量库加载完成，耗时: {time.time() - start_time:.2f}秒")
+            with _StageTimer(init_timings, "faiss_load", req):
+                faiss_path = Path(__file__).resolve().parent.parent.parent.parent.parent / "data/faiss_index_DeepSeek"
+                if not faiss_path.exists():
+                    raise FileNotFoundError(f"未找到向量库: {faiss_path}")
+                LLMProvider._vectorstore = FAISS.load_local(
+                    str(faiss_path),
+                    LLMProvider._embedding_model,
+                    allow_dangerous_deserialization=True
+                )
+            logger.info(f"[RAG] 向量库加载完成")
 
         # 优化5: 调整检索参数k值
         # 注意: k值是检索的文档数量，较小的k值可能会加快响应速度但可能影响答案质量
         # 建议根据实际情况测试不同的k值(1-5)找到最佳平衡点
         retriever_k = 2  # 从3减少到2，可以根据测试结果调整
         
-        # 创建LLM实例
-        llm = ChatOpenAI(
-            api_key=self.api_key,
-            base_url=self.base_url,
-            model_name=self.model_name,
-            temperature=0.2,
-        )
-        
-        # 创建检索器
-        retriever = LLMProvider._vectorstore.as_retriever(search_kwargs={"k": retriever_k})
-        
-        # 创建QA链，使用优化的提示词模板
-        self.qa_chain = RetrievalQA.from_chain_type(
-            llm=llm,
-            retriever=retriever,
-            chain_type="stuff",
-            chain_type_kwargs={"prompt": OPTIMIZED_PROMPT},
-            return_source_documents=True,
-        )
-        
-        # 保存检索器的引用，用于真正的流式响应
+        # LLM & Retriever 创建
+        with _StageTimer(init_timings, "llm_retriever_build", req):
+            llm = ChatOpenAI(
+                api_key=self.api_key,
+                base_url=self.base_url,
+                model_name=self.model_name,
+                temperature=0.2,
+            )
+            retriever = LLMProvider._vectorstore.as_retriever(search_kwargs={"k": retriever_k})
+            self.qa_chain = RetrievalQA.from_chain_type(
+                llm=llm,
+                retriever=retriever,
+                chain_type="stuff",
+                chain_type_kwargs={"prompt": OPTIMIZED_PROMPT},
+                return_source_documents=True,
+            )
         self.retriever = retriever
         self.llm = llm
+
+        #Reranker
         reranker_model_path = Path(__file__).resolve().parent.parent.parent.parent.parent / "models/bge-reranker-v2-m3"
         if FlagReranker is not None:
-            self.reranker = FlagReranker(
-                model_name_or_path = str(reranker_model_path), 
-                devices=["cpu"]
+            with _StageTimer(init_timings, "reranker_load", req):
+                self.reranker = FlagReranker(
+                    model_name_or_path=str(reranker_model_path),
+                    devices=[device]
                 )
-            # 尝试关闭 fast tokenizer 的 pad 警告
-            try:
-                tok = getattr(self.reranker, "tokenizer", None)
-                if tok is not None and hasattr(tok, "deprecation_warnings"):
-                    tok.deprecation_warnings["Asking-to-pad-a-fast-tokenizer"] = True
-            except Exception:
-                # 忽略任何错误，确保加载流程不受影响
-                pass
+                try:
+                    tok = getattr(self.reranker, "tokenizer", None)
+                    if tok is not None and hasattr(tok, "deprecation_warnings"):
+                        tok.deprecation_warnings["Asking-to-pad-a-fast-tokenizer"] = True
+                except Exception:
+                    pass
             logger.info(f"[RAG] Reranker 加载完成: {self.reranker_model}, device={device}")
+
+        # 总结日志
+        if init_timings:
+            logger.info(
+                "[TIMING][init] summary: " +
+                _format_timings(init_timings)
+            )
     
     def clean_rag_text(self, text: str) -> str:
         """清理RAG输出中的Markdown符号,让TTS更自然"""
@@ -368,131 +419,146 @@ class LLMProvider(LLMProviderBase):
 
     # 优化6: 实现真正的流式RAG响应
     def rag_response_stream(self, query: str):
-        logger.info(f"[RAG-STREAM] 开始流式处理查询: {query}")
+        req_id = uuid.uuid4().hex[:8]
+        timings: Dict[str, float] = {}
+        t0 = time.perf_counter()
+        logger.info(f"[RAG-STREAM][{req_id}] 开始流式处理查询: {query}")
         
         # 检查缓存
-        cached_result = LLMProvider._query_cache.get(query)
+        with _StageTimer(timings, "cache_lookup", req_id):
+            cached_result = LLMProvider._query_cache.get(query)
         if cached_result:
-            logger.info("[RAG-STREAM] 命中缓存，直接返回缓存结果")
+            logger.info(f"[RAG-STREAM][{req_id}] 命中缓存，直接返回缓存结果")
             cleaned_text = self.clean_rag_text(cached_result)
             
             # 模拟流式返回缓存结果
-            buffer = ""
-            for sentence in re.split(r'(。|！|\!|\\?|\\？)', cleaned_text):
-                if sentence.strip():
-                    buffer += sentence
-                    if len(buffer) >= 50:  # 减小缓冲区大小，更快返回第一个结果
-                        yield buffer.strip(), None
-                        buffer = ""
-            
-            if buffer.strip():
-                yield buffer.strip(), None
+            with _StageTimer(timings, "cached_emit", req_id):
+                buffer = ""
+                for sentence in re.split(r'(。|！|\!|\\?|\\？)', cleaned_text):
+                    if sentence.strip():
+                        buffer += sentence
+                        if len(buffer) >= 50:
+                            yield buffer.strip(), None
+                            buffer = ""
+                if buffer.strip():
+                    yield buffer.strip(), None
+
+            timings["end_to_end"] = time.perf_counter() - t0
+            self._last_timings = {"req_id": req_id, **_numeric_timings(timings)}
+            logger.info("[TIMING][%s] summary: %s" % (req_id, _format_timings(timings)))
             return
         
         try:
-            # 步骤1: 先执行检索，获取相关文档
-            start_time = time.time()
-            # 使用 invoke 方法替代 get_relevant_documents，避免弃用警告
-            relevant_docs = self.retriever.invoke(query)
+            # 1）检索
+            with _StageTimer(timings, "retrieval", req_id):
+                relevant_docs = self.retriever.invoke(query)
+            
+            # 2）重排
             docs_scores = []
             if relevant_docs:
-                docs_scores = self._rerank_with_scores(query, relevant_docs, top_n=3)
-            retrieval_time = time.time() - start_time
-            logger.info(f"[RAG-STREAM] 检索完成，耗时: {retrieval_time:.2f}秒，找到{len(relevant_docs)}个相关文档")
+                with _StageTimer(timings, "rerank", req_id):
+                    docs_scores = self._rerank_with_scores(query, relevant_docs, top_n=3)
+            logger.info(f"[RAG-STREAM][{req_id}] 检索完成，找到{len(relevant_docs)}个相关文档")
             
-            # 判断是否使用知识库：如果无文档或最高分低于阈值，则回退到大模型
+            # 3） 阈值判断
             fallback_to_llm = False
             top_docs = []
             if docs_scores:
                 highest_score = docs_scores[0][1]
                 if highest_score < SIMILARITY_THRESHOLD:
-                    logger.info(
-                        f"[RAG-STREAM] 最高相关性分数 {highest_score:.4f} 低于阈值 {SIMILARITY_THRESHOLD}, 回退至纯LLM回答"
-                    )
                     fallback_to_llm = True
+                    logger.info(
+                    f"[RAG-STREAM][{req_id}] 最高相关性分数 {highest_score:.4f} 低于阈值 {SIMILARITY_THRESHOLD}, 回退至纯LLM回答"
+                )
                 else:
                     # 提取排序后的文档
                     top_docs = [doc for doc, score in docs_scores]
             else:
                 fallback_to_llm = True
 
-            # 步骤3: 如果回退标志已触发，直接由大模型回答用户问题
+            # 4） LLM直接回答
             if fallback_to_llm:
                 try:
                     # 使用大模型直接回答，不提供上下文
-                    llm_start_time = time.time()
-                    # 使用系统提示确保对话人格一致
-                    messages = [
-                        {
-                            "role": "system",
-                            "content": "你是一名\"家庭医生管家\"，主要解答孕期相关的中医知识问题。请用友好且专业的口吻直接回答以下用户提问。如果你不确定答案，请诚实告知。"
-                        },
-                        {"role": "user", "content": query},
-                    ]
-                    stream = self.client.chat.completions.create(
-                        model=self.model_name,
-                        messages=messages,
-                        stream=True,
-                        temperature=0.2,
-                        max_tokens=self.max_tokens,
-                    )
-                    full_response = ""
-                    for chunk in stream:
-                        try:
-                            delta = chunk.choices[0].delta
-                        except Exception:
-                            delta = None
-                        if delta and hasattr(delta, "content") and delta.content:
-                            content = delta.content
-                            full_response += content
-                            yield content, None
-                    llm_generation_time = time.time() - llm_start_time
-                    logger.info(f"[RAG-STREAM] 纯LLM回答完成，耗时: {llm_generation_time:.2f}秒")
-                    # 缓存直接生成的结果
+                    with _StageTimer(timings, "llm_generation", req_id):
+                        # 使用系统提示确保对话人格一致
+                        messages = [
+                            {
+                                "role": "system",
+                                "content": "你是一名\"家庭医生管家\"，主要解答孕期相关的中医知识问题。请用友好且专业的口吻直接回答以下用户提问。如果你不确定答案，请诚实告知。"
+                            },
+                            {"role": "user", "content": query},
+                        ]
+                        stream = self.client.chat.completions.create(
+                            model=self.model_name,
+                            messages=messages,
+                            stream=True,
+                            temperature=0.2,
+                            max_tokens=self.max_tokens,
+                        )
+                        full_response = ""
+                        for chunk in stream:
+                            try:
+                                delta = chunk.choices[0].delta
+                            except Exception:
+                                delta = None
+                            if delta and hasattr(delta, "content") and delta.content:
+                                content = delta.content
+                                full_response += content
+                                yield content, None
                     LLMProvider._query_cache.set(query, full_response)
+
+                    timings["end_to_end"] = time.perf_counter() - t0
+                    self._last_timings = {"req_id": req_id, **_numeric_timings(timings)}
+                    logger.info("[TIMING][%s] summary: %s" % (
+                        req_id, _format_timings(timings)
+                    ))
                     return
                 except Exception as e:
                     logger.error(f"[RAG-STREAM] 纯LLM回答失败: {e}")
                     yield "【RAG模型处理失败】", None
                     return
 
-            # 步骤3: 使用知识库构建上下文并生成答案
-            # 如果 docs_scores 可用但 top_docs 为空，回退为原有检索顺序
+            # 5) RAG 构造提示 + 生成
             if not top_docs and relevant_docs:
                 top_docs = self._rerank_only(query, relevant_docs)
-            context = "\n\n".join([doc.page_content for doc in relevant_docs])
-            prompt_input = OPTIMIZED_PROMPT.format(
-                context=context,
-                question=query,
-                is_knowledge=not fallback_to_llm,
-            )
-            try:
-                start_generation_time = time.time()
-                stream = self.client.chat.completions.create(
-                    model=self.model_name,
-                    messages=[{"role": "user", "content": prompt_input}],
-                    stream=True,
-                    temperature=0.2,
-                    max_tokens=self.max_tokens,
+
+            with _StageTimer(timings, "prompt_build", req_id):
+                context = "\n\n".join([doc.page_content for doc in relevant_docs])
+                prompt_input = OPTIMIZED_PROMPT.format(
+                    context=context, question=query, is_knowledge=not fallback_to_llm
                 )
-                full_response = ""
-                for chunk in stream:
-                    if hasattr(chunk.choices[0].delta, "content") and chunk.choices[0].delta.content:
-                        content = chunk.choices[0].delta.content
-                        full_response += content
-                        yield content, None
-                generation_time = time.time() - start_generation_time
-                logger.info(f"[RAG-STREAM] RAG生成完成，耗时: {generation_time:.2f}秒")
-                # 缓存RAG生成结果
+
+            try:
+                with _StageTimer(timings, "rag_generation", req_id):
+                    stream = self.client.chat.completions.create(
+                        model=self.model_name,
+                        messages=[{"role": "user", "content": prompt_input}],
+                        stream=True,
+                        temperature=0.2,
+                        max_tokens=self.max_tokens,
+                    )
+                    full_response = ""
+                    for chunk in stream:
+                        if hasattr(chunk.choices[0].delta, "content") and chunk.choices[0].delta.content:
+                            content = chunk.choices[0].delta.content
+                            full_response += content
+                            yield content, None
                 LLMProvider._query_cache.set(query, full_response)
+
+                timings["end_to_end"] = time.perf_counter() - t0
+                self._last_timings = {"req_id": req_id, **_numeric_timings(timings)}
+                logger.info("[TIMING][%s] summary: %s" % (
+                    req_id, _format_timings(timings)
+                ))
                 return
             except Exception as e:
-                logger.error(f"[RAG-STREAM] RAG模型生成失败: {e}")
+                logger.error(f"[RAG-STREAM][{req_id}] RAG模型生成失败: {e}")
                 yield "【RAG模型处理失败】", None
                 return
             
         except Exception as e:
-            logger.error(f"[RAG-STREAM] 流式处理失败: {e}")
+            logger.error(f"[RAG-STREAM][{req_id}] 流式处理失败: {e}")
             yield "【RAG模型处理失败】", None
 
     def response(self, session_id, dialogue, **kwargs):
@@ -537,43 +603,61 @@ class LLMProvider(LLMProviderBase):
 
     def response_with_functions(self, session_id, dialogue, functions=None):
         logger.info("[OPENAI] 调用 response_with_functions")
+        req_id = uuid.uuid4().hex[:8]
+        timings: Dict[str, float] = {}
+        t0 = time.perf_counter()
+
         try:
             query = dialogue[-1]["content"] if dialogue else ""
             logger.info(f"[OPENAI] 收到请求: {query}")
-            # self.save_text_to_mysql("74:56:3c:12:c6:3d","req",query)
-            try:
-                max_score = self._get_max_similarity_score(query)
-            except Exception as e:
-                logger.warning(f"[OPENAI] 计算相关性分数失败，将使用默认函数模式: {e}")
-                max_score = 0.0
+            self.save_text_to_mysql("74:56:3c:12:c6:3d","req",query)
+            with _StageTimer(timings, "score_lookup", req_id):
+                try:
+                    max_score = self._get_max_similarity_score(query)
+                except Exception as e:
+                    logger.warning(f"[OPENAI][{req_id}] 计算相关性分数失败，将使用默认函数模式: {e}")
+                    max_score = 0.0
+
             if max_score >= SIMILARITY_THRESHOLD:
                 logger.info(
-                    f"[OPENAI] 检索相关性分数 {max_score:.4f} ≥ 阈值 {SIMILARITY_THRESHOLD}, 使用 RAG 流式模型"
+                f"[OPENAI][{req_id}] 检索相关性分数 {max_score:.4f} ≥ 阈值 {SIMILARITY_THRESHOLD}, 使用 RAG 流式模型"
                 )
                 for chunk, _ in self.rag_response_stream(query):
                     yield chunk, None
+                # rag_response_stream 结束后拿到它的计时字典并合并一个总耗时
+                timings.update(_numeric_timings(self._last_timings))
+                timings["end_to_end_overall"] = time.perf_counter() - t0
+                self._last_timings = {"req_id": req_id, **_numeric_timings(timings)}
+                logger.info("[TIMING][%s] overall: %s" % (
+                    req_id, _format_timings(timings)
+                ))
                 return
-            # 当相关性低时，使用 function 模式回答
+            
             logger.info(
-                f"[OPENAI] 检索相关性分数 {max_score:.4f} < 阈值 {SIMILARITY_THRESHOLD}, 使用 function 模式"
+            f"[OPENAI][{req_id}] 检索相关性分数 {max_score:.4f} < 阈值 {SIMILARITY_THRESHOLD}, 使用 function 模式"
             )
 
-            stream = self.client.chat.completions.create(
-                model=self.model_name, messages=dialogue, stream=True, tools=functions
-            )
+            # 函数模式流式
+            with _StageTimer(timings, "function_stream", req_id):
+                stream = self.client.chat.completions.create(
+                    model=self.model_name, messages=dialogue, stream=True, tools=functions
+                )
+                for chunk in stream:
+                    if getattr(chunk, "choices", None):
+                        yield chunk.choices[0].delta.content, chunk.choices[0].delta.tool_calls
+                    elif isinstance(getattr(chunk, "usage", None), CompletionUsage):
+                        usage_info = getattr(chunk, "usage", None)
+                        logger.bind(tag=TAG).info(
+                            f"Token 消耗：输入 {getattr(usage_info, 'prompt_tokens', '未知')}，"
+                            f"输出 {getattr(usage_info, 'completion_tokens', '未知')}，"
+                            f"共计 {getattr(usage_info, 'total_tokens', '未知')}"
+                        )
 
-            for chunk in stream:
-                # 检查是否存在有效的choice且content不为空
-                if getattr(chunk, "choices", None):
-                    yield chunk.choices[0].delta.content, chunk.choices[0].delta.tool_calls
-                # 存在 CompletionUsage 消息时，生成 Token 消耗 log
-                elif isinstance(getattr(chunk, "usage", None), CompletionUsage):
-                    usage_info = getattr(chunk, "usage", None)
-                    logger.bind(tag=TAG).info(
-                        f"Token 消耗：输入 {getattr(usage_info, 'prompt_tokens', '未知')}，"
-                        f"输出 {getattr(usage_info, 'completion_tokens', '未知')}，"
-                        f"共计 {getattr(usage_info, 'total_tokens', '未知')}"
-                    )
+            timings["end_to_end_overall"] = time.perf_counter() - t0
+            self._last_timings = {"req_id": req_id, **_numeric_timings(timings)}
+            logger.info("[TIMING][%s] overall: %s" % (
+                req_id, _format_timings(timings)
+            ))
 
         except Exception as e:
             logger.bind(tag=TAG).error(f"Error in function call streaming: {e}")
