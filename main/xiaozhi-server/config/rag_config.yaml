@@ -1,0 +1,20 @@
+rag:
+  enabled: true
+  device: auto
+  k: 2
+  thresholds:
+    mqr_trigger_low: -0.8
+    mqr_trigger_high: 0.0
+    good_enough: -0.2
+  paths:
+    embedding_model: ./models/bge-large-zh
+    reranker_model: ./models/bge-reranker-v2-m3
+    faiss_index:    ./data/faiss_index_DeepSeek
+
+mysql:
+  enabled: false
+  host: ${MYSQL_HOST:localhost}
+  port: ${MYSQL_PORT:3306}
+  user: ${MYSQL_USER:root}
+  password: ${MYSQL_PASSWORD:}
+  database: xiaozhi_esp32_server
