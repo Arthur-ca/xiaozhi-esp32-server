@@ -92,14 +92,27 @@ class RAGPipeline:
         return mode, msgs, timings
 
     def stream(self, dialogue: List[Dict[str,str]],
-               stream_fn: Callable[[List[Dict[str,str]]], Iterable[str]],
-               mqr_llm: Dict[str,str] | None = None) -> Iterable[str]:
+           stream_fn: Callable[[List[Dict[str,str]]], Iterable[str]],
+           mqr_llm: Dict[str,str] | None = None) -> Iterable[str]:
+        # 1) 先做路由与检索链（retrieve / probe / mqr / rerank / compose）
         query = (dialogue[-1].get("content") if dialogue else "").strip()
         mode, sys_msgs, timings = self.route(query, mqr_llm=mqr_llm)
+
+        # 2) 非 RAG 模式
+        if mode != "RAG" or not sys_msgs:
+            with log_stage(logger, timings, "generate_passthrough"):
+                for s in stream_fn(dialogue):
+                    yield s
+            summary = " | ".join([f"{k}={v:.3f}s" for k, v in timings.items()])
+            logger.info(f"[RAG] summary | {summary}")
+            return
+
+        # 3) RAG 模式：在最终生成阶段做计时
+        messages = sys_msgs + dialogue
+        with log_stage(logger, timings, "generate"):
+            for s in stream_fn(messages):
+                yield s
+
+        # 4) 打印本轮 RAG 全流程汇总（含 generate）
         summary = " | ".join([f"{k}={v:.3f}s" for k, v in timings.items()])
         logger.info(f"[RAG] summary | {summary}")
-        if mode != "RAG" or not sys_msgs:
-            for s in stream_fn(dialogue): yield s
-            return
-        messages = sys_msgs + dialogue
-        for s in stream_fn(messages): yield s
