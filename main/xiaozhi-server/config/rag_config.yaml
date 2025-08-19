@@ -3,9 +3,9 @@ rag:
   device: auto
   k: 2
   thresholds:
-    mqr_trigger_low: -0.8
-    mqr_trigger_high: 0.0
-    good_enough: -0.2
+    mqr_trigger_low:  0.0
+    mqr_trigger_high: 0.25
+    good_enough: 0.25
   paths:
     embedding_model: ./models/bge-large-zh
     reranker_model: ./models/bge-reranker-v2-m3
